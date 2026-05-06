@@ -370,7 +370,7 @@ class AdfnewsPdfPlugin
                 <div class="meta"><?php echo esc_html($date . ' - ' . $author); ?></div>
                 <?php if (!empty($options['include_images'])) : ?>
                     <?php
-                    $thumb_url = get_the_post_thumbnail_url($post, 'large');
+                    $thumb_url = get_the_post_thumbnail_url($post, 'medium');
                     $image_src = $thumb_url ? self::imageUrlToDataUri($thumb_url) : '';
                     ?>
                     <?php if ($image_src !== '') : ?>
