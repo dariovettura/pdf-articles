@@ -283,14 +283,15 @@ class ADFNews_Weekly_PDF_Plugin
         }
 
         $filename = 'adfnews-export-' . ($isTest ? 'test-' : '') . gmdate('Ymd-His') . '.pdf';
-        $target_path = trailingslashit($upload['basedir']) . $filename;
-        $target_url = trailingslashit($upload['baseurl']) . $filename;
+        $target_path = trailingslashit($upload['path']) . $filename;
+        $target_url = trailingslashit($upload['url']) . $filename;
 
         $written = file_put_contents($target_path, $pdf);
         if ($written === false) {
             return ['ok' => false, 'message' => 'Errore durante il salvataggio del PDF.'];
         }
 
+        self::registerPdfInMediaLibrary($target_path, $filename);
         self::storeLastRunInfo((string) $range['label'], count($posts), esc_url_raw($target_url));
 
         return [
@@ -491,6 +492,41 @@ class ADFNews_Weekly_PDF_Plugin
         }
 
         return 'data:' . $mime . ';base64,' . base64_encode($body);
+    }
+
+    private static function registerPdfInMediaLibrary(string $file_path, string $filename): void
+    {
+        if (!file_exists($file_path)) {
+            return;
+        }
+
+        $uploads = wp_upload_dir();
+        $relative_path = ltrim(str_replace(trailingslashit($uploads['basedir']), '', $file_path), '/');
+        $existing = attachment_url_to_postid(trailingslashit($uploads['baseurl']) . $relative_path);
+        if ($existing) {
+            return;
+        }
+
+        $attachment = [
+            'post_mime_type' => 'application/pdf',
+            'post_title' => sanitize_file_name(pathinfo($filename, PATHINFO_FILENAME)),
+            'post_content' => '',
+            'post_status' => 'inherit',
+            'guid' => trailingslashit($uploads['baseurl']) . $relative_path,
+        ];
+
+        $attachment_id = wp_insert_attachment($attachment, $file_path);
+        if (is_wp_error($attachment_id) || !$attachment_id) {
+            return;
+        }
+
+        if (!function_exists('wp_generate_attachment_metadata')) {
+            require_once ABSPATH . 'wp-admin/includes/image.php';
+        }
+        if (function_exists('wp_generate_attachment_metadata')) {
+            $metadata = wp_generate_attachment_metadata($attachment_id, $file_path);
+            wp_update_attachment_metadata($attachment_id, $metadata);
+        }
     }
 
     private static function authorizeAdminAction(): void
