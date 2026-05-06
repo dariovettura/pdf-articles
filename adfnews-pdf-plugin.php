@@ -260,32 +260,10 @@ class AdfnewsPdfPlugin
             return ['ok' => false, 'message' => 'Nessun articolo trovato con i filtri selezionati.'];
         }
 
-        $lines = [];
-        $lines[] = 'ADF News - Export PDF';
-        $lines[] = 'Generato: ' . current_time('mysql');
-        $lines[] = $isTest ? 'Modalita: TEST' : 'Modalita: CRON/MANUALE';
-        $lines[] = 'Articoli: ' . count($posts);
-        $lines[] = '';
-
-        foreach ($posts as $index => $post) {
-            $title = get_the_title($post);
-            $date = get_the_date('Y-m-d H:i', $post);
-            $content = wp_strip_all_tags($post->post_content);
-            $content = preg_replace('/\s+/', ' ', $content ?? '');
-            $excerpt = mb_substr((string) $content, 0, 280);
-            $lines[] = ($index + 1) . '. ' . $title;
-            $lines[] = 'Data: ' . $date;
-            if (!empty($options['include_images'])) {
-                $thumb_url = get_the_post_thumbnail_url($post, 'medium');
-                if ($thumb_url) {
-                    $lines[] = 'Immagine: ' . $thumb_url;
-                }
-            }
-            $lines[] = $excerpt;
-            $lines[] = '';
+        $pdf = self::createDompdfDocument($posts, $options, $isTest);
+        if ($pdf === '') {
+            return ['ok' => false, 'message' => 'Dompdf non disponibile. Carica il plugin con la cartella vendor/.'];
         }
-
-        $pdf = self::createSimplePdf($lines);
         $upload = wp_upload_dir();
         if (!empty($upload['error'])) {
             return ['ok' => false, 'message' => 'Errore upload directory: ' . $upload['error']];
@@ -307,47 +285,127 @@ class AdfnewsPdfPlugin
         ];
     }
 
-    private static function createSimplePdf(array $lines): string
+    private static function createDompdfDocument(array $posts, array $options, bool $isTest): string
     {
-        $safe_lines = [];
-        foreach ($lines as $line) {
-            $safe_lines[] = str_replace(['\\', '(', ')'], ['\\\\', '\(', '\)'], (string) $line);
+        self::loadDompdfAutoloader();
+
+        if (!class_exists('\Dompdf\Dompdf')) {
+            return '';
         }
 
-        $stream = "BT\n/F1 10 Tf\n50 790 Td\n";
-        foreach ($safe_lines as $i => $line) {
-            if ($i > 0) {
-                $stream .= "0 -14 Td\n";
+        $html = self::buildPdfHtml($posts, $options, $isTest);
+        $dompdf = new \Dompdf\Dompdf([
+            'isRemoteEnabled' => true,
+            'isHtml5ParserEnabled' => true,
+            'defaultPaperSize' => 'a4',
+        ]);
+        $dompdf->loadHtml($html, 'UTF-8');
+        $dompdf->setPaper('A4', 'portrait');
+        $dompdf->render();
+        return $dompdf->output();
+    }
+
+    private static function loadDompdfAutoloader(): void
+    {
+        $candidates = [
+            __DIR__ . '/vendor/autoload.php',
+            __DIR__ . '/adfnews-weekly-pdf/vendor/autoload.php',
+            dirname(__DIR__) . '/vendor/autoload.php',
+        ];
+
+        foreach ($candidates as $autoload) {
+            if (file_exists($autoload)) {
+                require_once $autoload;
+                return;
             }
-            $stream .= '(' . $line . ") Tj\n";
         }
-        $stream .= "ET\n";
+    }
 
-        $objects = [];
-        $objects[] = "1 0 obj<< /Type /Catalog /Pages 2 0 R >>endobj\n";
-        $objects[] = "2 0 obj<< /Type /Pages /Count 1 /Kids [3 0 R] >>endobj\n";
-        $objects[] = "3 0 obj<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>endobj\n";
-        $objects[] = "4 0 obj<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>endobj\n";
-        $objects[] = "5 0 obj<< /Length " . strlen($stream) . " >>stream\n" . $stream . "endstream\nendobj\n";
+    private static function buildPdfHtml(array $posts, array $options, bool $isTest): string
+    {
+        ob_start();
+        ?>
+        <!doctype html>
+        <html>
+        <head>
+            <meta charset="utf-8" />
+            <style>
+                @page { margin: 28px 24px; }
+                body { font-family: DejaVu Sans, Arial, sans-serif; font-size: 12px; color: #111; line-height: 1.55; }
+                h1, h2, h3 { margin: 0 0 8px 0; }
+                .cover { border-bottom: 1px solid #ddd; margin-bottom: 14px; padding-bottom: 12px; }
+                .meta { color: #666; font-size: 11px; margin-bottom: 12px; }
+                .article { page-break-before: always; }
+                .article:first-of-type { page-break-before: auto; }
+                .content, .content * {
+                    word-wrap: break-word;
+                    overflow-wrap: break-word;
+                    white-space: normal !important;
+                    max-width: 100% !important;
+                }
+                img { max-width: 100% !important; height: auto !important; display: block; margin: 8px 0 12px; }
+                .source { margin-top: 10px; font-size: 10px; color: #666; }
+            </style>
+        </head>
+        <body>
+        <div class="cover">
+            <h1>ADF News - Export PDF</h1>
+            <div class="meta">
+                Generato: <?php echo esc_html(current_time('mysql')); ?><br />
+                Modalita: <?php echo esc_html($isTest ? 'TEST' : 'CRON/MANUALE'); ?><br />
+                Articoli: <?php echo esc_html((string) count($posts)); ?>
+            </div>
+        </div>
+        <?php foreach ($posts as $index => $post) : ?>
+            <?php
+            $title = get_the_title($post);
+            $date = get_the_date('Y-m-d H:i', $post);
+            $author = get_the_author_meta('display_name', (int) $post->post_author);
+            $content = apply_filters('the_content', $post->post_content);
+            $content = preg_replace('#<script(.*?)>(.*?)</script>#is', '', (string) $content);
+            $content = preg_replace('#<iframe(.*?)>(.*?)</iframe>#is', '', (string) $content);
+            ?>
+            <article class="article">
+                <h2><?php echo esc_html(($index + 1) . '. ' . $title); ?></h2>
+                <div class="meta"><?php echo esc_html($date . ' - ' . $author); ?></div>
+                <?php if (!empty($options['include_images'])) : ?>
+                    <?php
+                    $thumb_url = get_the_post_thumbnail_url($post, 'large');
+                    $image_src = $thumb_url ? self::imageUrlToDataUri($thumb_url) : '';
+                    ?>
+                    <?php if ($image_src !== '') : ?>
+                        <img src="<?php echo esc_attr($image_src); ?>" alt="" />
+                    <?php endif; ?>
+                <?php endif; ?>
+                <div class="content"><?php echo wp_kses_post($content); ?></div>
+                <div class="source"><?php echo esc_html(get_permalink($post)); ?></div>
+            </article>
+        <?php endforeach; ?>
+        </body>
+        </html>
+        <?php
+        return (string) ob_get_clean();
+    }
 
-        $pdf = "%PDF-1.4\n";
-        $offsets = [0];
-
-        foreach ($objects as $obj) {
-            $offsets[] = strlen($pdf);
-            $pdf .= $obj;
+    private static function imageUrlToDataUri(string $url): string
+    {
+        $response = wp_remote_get($url, ['timeout' => 20]);
+        if (is_wp_error($response)) {
+            return '';
         }
 
-        $xref_offset = strlen($pdf);
-        $pdf .= "xref\n0 " . (count($objects) + 1) . "\n";
-        $pdf .= "0000000000 65535 f \n";
-        for ($i = 1; $i <= count($objects); $i++) {
-            $pdf .= sprintf("%010d 00000 n \n", $offsets[$i]);
+        $body = wp_remote_retrieve_body($response);
+        if ($body === '') {
+            return '';
         }
-        $pdf .= "trailer<< /Size " . (count($objects) + 1) . " /Root 1 0 R >>\n";
-        $pdf .= "startxref\n" . $xref_offset . "\n%%EOF";
 
-        return $pdf;
+        $mime = wp_remote_retrieve_header($response, 'content-type');
+        if (!is_string($mime) || $mime === '') {
+            $image_info = @getimagesizefromstring($body);
+            $mime = is_array($image_info) && !empty($image_info['mime']) ? $image_info['mime'] : 'image/jpeg';
+        }
+
+        return 'data:' . $mime . ';base64,' . base64_encode($body);
     }
 
     private static function authorizeAdminAction(): void
