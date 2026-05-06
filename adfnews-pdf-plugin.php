@@ -13,6 +13,7 @@ if (!defined('ABSPATH')) {
 class AdfnewsPdfPlugin
 {
     private const OPTION_KEY = 'adfnews_pdf_options';
+    private const LAST_RUN_OPTION_KEY = 'adfnews_pdf_last_run_info';
     private const CRON_HOOK = 'adfnews_pdf_hourly_event';
     private const NONCE_ACTION = 'adfnews_pdf_admin_action';
 
@@ -91,9 +92,11 @@ class AdfnewsPdfPlugin
         }
 
         $options = wp_parse_args(get_option(self::OPTION_KEY, []), self::defaultOptions());
+        $last_run = get_option(self::LAST_RUN_OPTION_KEY, []);
         ?>
         <div class="wrap">
             <h1>ADF News PDF - Configurazione</h1>
+            <?php self::renderLastRunSection($last_run); ?>
             <form method="post" action="options.php">
                 <?php settings_fields(self::OPTION_KEY); ?>
                 <table class="form-table" role="presentation">
@@ -220,6 +223,7 @@ class AdfnewsPdfPlugin
     private static function generatePdfFromSettings(bool $isTest): array
     {
         $options = wp_parse_args(get_option(self::OPTION_KEY, []), self::defaultOptions());
+        $range = self::resolveArticleRange($options, $isTest);
 
         $query_args = [
             'post_type' => 'post',
@@ -253,6 +257,12 @@ class AdfnewsPdfPlugin
                     'inclusive' => true,
                 ];
             }
+        } elseif (!empty($range['start']) && !empty($range['end'])) {
+            $query_args['date_query'][] = [
+                'after' => $range['start'],
+                'before' => $range['end'],
+                'inclusive' => true,
+            ];
         }
 
         $posts = get_posts($query_args);
@@ -278,11 +288,84 @@ class AdfnewsPdfPlugin
             return ['ok' => false, 'message' => 'Errore durante il salvataggio del PDF.'];
         }
 
+        self::storeLastRunInfo((string) $range['label'], count($posts), esc_url_raw($target_url));
+
         return [
             'ok' => true,
             'message' => 'PDF creato correttamente.',
             'url' => esc_url_raw($target_url),
         ];
+    }
+
+    private static function resolveArticleRange(array $options, bool $isTest): array
+    {
+        if ($isTest) {
+            $start = !empty($options['date_from']) ? str_replace('T', ' ', $options['date_from']) : '';
+            $end = !empty($options['date_to']) ? str_replace('T', ' ', $options['date_to']) : '';
+            return [
+                'start' => $start,
+                'end' => $end,
+                'label' => self::formatRangeLabel($start, $end),
+            ];
+        }
+
+        $timezone = new DateTimeZone($options['timezone']);
+        $now = new DateTimeImmutable('now', $timezone);
+        $thisMonday = $now->modify('monday this week')->setTime(0, 0, 0);
+        $start = $thisMonday->modify('-7 days');
+        $end = $thisMonday->modify('-1 second');
+
+        return [
+            'start' => $start->format('Y-m-d H:i:s'),
+            'end' => $end->format('Y-m-d H:i:s'),
+            'label' => self::formatRangeLabel($start->format('Y-m-d H:i:s'), $end->format('Y-m-d H:i:s')),
+        ];
+    }
+
+    private static function formatRangeLabel(string $start, string $end): string
+    {
+        if ($start === '' && $end === '') {
+            return 'Tutti gli articoli (nessun intervallo specifico)';
+        }
+
+        return trim(($start !== '' ? $start : 'inizio non impostato') . ' -> ' . ($end !== '' ? $end : 'fine non impostata'));
+    }
+
+    private static function storeLastRunInfo(string $range_label, int $posts_count, string $pdf_url): void
+    {
+        update_option(self::LAST_RUN_OPTION_KEY, [
+            'started_at' => current_time('mysql'),
+            'range_label' => $range_label,
+            'posts_count' => $posts_count,
+            'pdf_url' => $pdf_url,
+        ], false);
+    }
+
+    private static function renderLastRunSection($last_run): void
+    {
+        if (!is_array($last_run) || empty($last_run)) {
+            echo '<div style="background:#fff;border:1px solid #dcdcde;padding:12px 14px;margin:12px 0 18px;">';
+            echo '<strong>Ultimo cron partito:</strong> nessuna esecuzione registrata.';
+            echo '</div>';
+            return;
+        }
+
+        $started_at = !empty($last_run['started_at']) ? (string) $last_run['started_at'] : '-';
+        $range_label = !empty($last_run['range_label']) ? (string) $last_run['range_label'] : '-';
+        $posts_count = isset($last_run['posts_count']) ? (int) $last_run['posts_count'] : 0;
+        $pdf_url = !empty($last_run['pdf_url']) ? esc_url((string) $last_run['pdf_url']) : '';
+
+        echo '<div style="background:#fff;border:1px solid #dcdcde;padding:12px 14px;margin:12px 0 18px;">';
+        echo '<strong>Ultimo cron partito</strong>';
+        echo '<p style="margin:8px 0 0;"><strong>Quando:</strong> ' . esc_html($started_at) . '</p>';
+        echo '<p style="margin:6px 0 0;"><strong>Intervallo articoli:</strong> ' . esc_html($range_label) . '</p>';
+        echo '<p style="margin:6px 0 0;"><strong>Articoli inclusi:</strong> ' . esc_html((string) $posts_count) . '</p>';
+        if ($pdf_url !== '') {
+            echo '<p style="margin:6px 0 0;"><strong>PDF generato:</strong> <a href="' . $pdf_url . '" target="_blank" rel="noopener noreferrer">Apri PDF</a></p>';
+        } else {
+            echo '<p style="margin:6px 0 0;"><strong>PDF generato:</strong> non disponibile</p>';
+        }
+        echo '</div>';
     }
 
     private static function createDompdfDocument(array $posts, array $options, bool $isTest): string
