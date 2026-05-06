@@ -3,7 +3,8 @@
  * Plugin Name: ADFNews Weekly PDF
  * Description: Genera PDF articoli con cron e configurazione completa da pannello admin.
  * Version: 1.0.0
- * Author: ADFNews
+ * Author: Ars Digitalia
+ * Author URI: https://arsdigitalia.it/
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * Text Domain: adfnews-weekly-pdf
@@ -25,9 +26,9 @@ class ADFNews_Weekly_PDF_Plugin
         add_action('admin_menu', [self::class, 'registerAdminMenu']);
         add_action('admin_init', [self::class, 'registerSettings']);
         add_action('admin_post_adfnews_pdf_manual_regen', [self::class, 'handleManualRegeneration']);
-        add_action('admin_post_adfnews_pdf_test_generation', [self::class, 'handleTestGeneration']);
         add_action(self::CRON_HOOK, [self::class, 'maybeRunCronGeneration']);
         add_action('admin_notices', [self::class, 'renderAdminNotice']);
+        add_action('template_redirect', [self::class, 'maybeRedirectToLastPdf']);
     }
 
     public static function activate(): void
@@ -82,8 +83,6 @@ class ADFNews_Weekly_PDF_Plugin
         $output['exclude_categories'] = sanitize_text_field($input['exclude_categories'] ?? '');
         $output['max_articles'] = max(1, min(200, intval($input['max_articles'] ?? $defaults['max_articles'])));
         $output['include_images'] = !empty($input['include_images']) ? 1 : 0;
-        $output['date_from'] = self::sanitizeDateTime($input['date_from'] ?? '');
-        $output['date_to'] = self::sanitizeDateTime($input['date_to'] ?? '');
 
         return wp_parse_args($output, $defaults);
     }
@@ -161,15 +160,6 @@ class ADFNews_Weekly_PDF_Plugin
                             </label>
                         </td>
                     </tr>
-                    <tr>
-                        <th scope="row">Intervallo date per PDF test</th>
-                        <td>
-                            <label for="date_from">Da</label><br />
-                            <input id="date_from" type="datetime-local" name="<?php echo esc_attr(self::OPTION_KEY); ?>[date_from]" value="<?php echo esc_attr($options['date_from']); ?>" /><br /><br />
-                            <label for="date_to">A</label><br />
-                            <input id="date_to" type="datetime-local" name="<?php echo esc_attr(self::OPTION_KEY); ?>[date_to]" value="<?php echo esc_attr($options['date_to']); ?>" />
-                        </td>
-                    </tr>
                 </table>
                 <?php submit_button('Salva impostazioni'); ?>
             </form>
@@ -184,11 +174,6 @@ class ADFNews_Weekly_PDF_Plugin
                 <?php submit_button('Rigenera ora', 'secondary', 'submit', false); ?>
             </form>
 
-            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" style="display:inline-block;">
-                <?php wp_nonce_field(self::NONCE_ACTION, '_wpnonce_adfnews_pdf'); ?>
-                <input type="hidden" name="action" value="adfnews_pdf_test_generation" />
-                <?php submit_button('Crea PDF di test', 'primary', 'submit', false); ?>
-            </form>
         </div>
         <?php
     }
@@ -196,14 +181,7 @@ class ADFNews_Weekly_PDF_Plugin
     public static function handleManualRegeneration(): void
     {
         self::authorizeAdminAction();
-        $result = self::generatePdfFromSettings(false);
-        self::redirectWithMessage($result);
-    }
-
-    public static function handleTestGeneration(): void
-    {
-        self::authorizeAdminAction();
-        $result = self::generatePdfFromSettings(true);
+        $result = self::generatePdfFromSettings();
         self::redirectWithMessage($result);
     }
 
@@ -220,13 +198,30 @@ class ADFNews_Weekly_PDF_Plugin
             return;
         }
 
-        self::generatePdfFromSettings(false);
+        self::generatePdfFromSettings();
     }
 
-    private static function generatePdfFromSettings(bool $isTest): array
+    public static function maybeRedirectToLastPdf(): void
+    {
+        if (!isset($_GET['adf_last_pdf']) || (string) $_GET['adf_last_pdf'] !== '1') {
+            return;
+        }
+
+        $last_run = get_option(self::LAST_RUN_OPTION_KEY, []);
+        $pdf_url = is_array($last_run) && !empty($last_run['pdf_url']) ? esc_url_raw((string) $last_run['pdf_url']) : '';
+
+        if ($pdf_url === '') {
+            wp_die('PDF non ancora disponibile.', 'ADF News', ['response' => 404]);
+        }
+
+        wp_safe_redirect($pdf_url, 302);
+        exit;
+    }
+
+    private static function generatePdfFromSettings(): array
     {
         $options = wp_parse_args(get_option(self::OPTION_KEY, []), self::defaultOptions());
-        $range = self::resolveArticleRange($options, $isTest);
+        $range = self::resolveArticleRange($options);
 
         $query_args = [
             'post_type' => 'post',
@@ -247,20 +242,7 @@ class ADFNews_Weekly_PDF_Plugin
             $query_args['category__not_in'] = $exclude_ids;
         }
 
-        if ($isTest) {
-            if (!empty($options['date_from'])) {
-                $query_args['date_query'][] = [
-                    'after' => str_replace('T', ' ', $options['date_from']),
-                    'inclusive' => true,
-                ];
-            }
-            if (!empty($options['date_to'])) {
-                $query_args['date_query'][] = [
-                    'before' => str_replace('T', ' ', $options['date_to']),
-                    'inclusive' => true,
-                ];
-            }
-        } elseif (!empty($range['start']) && !empty($range['end'])) {
+        if (!empty($range['start']) && !empty($range['end'])) {
             $query_args['date_query'][] = [
                 'after' => $range['start'],
                 'before' => $range['end'],
@@ -273,7 +255,7 @@ class ADFNews_Weekly_PDF_Plugin
             return ['ok' => false, 'message' => 'Nessun articolo trovato con i filtri selezionati.'];
         }
 
-        $pdf = self::createDompdfDocument($posts, $options, $isTest);
+        $pdf = self::createDompdfDocument($posts, $options);
         if ($pdf === '') {
             return ['ok' => false, 'message' => 'Dompdf non disponibile. Carica il plugin con la cartella vendor/.'];
         }
@@ -282,7 +264,7 @@ class ADFNews_Weekly_PDF_Plugin
             return ['ok' => false, 'message' => 'Errore upload directory: ' . $upload['error']];
         }
 
-        $filename = 'adfnews-export-' . ($isTest ? 'test-' : '') . gmdate('Ymd-His') . '.pdf';
+        $filename = 'adfnews-export-' . gmdate('Ymd-His') . '.pdf';
         $target_path = trailingslashit($upload['path']) . $filename;
         $target_url = trailingslashit($upload['url']) . $filename;
 
@@ -301,23 +283,20 @@ class ADFNews_Weekly_PDF_Plugin
         ];
     }
 
-    private static function resolveArticleRange(array $options, bool $isTest): array
+    private static function resolveArticleRange(array $options): array
     {
-        if ($isTest) {
-            $start = !empty($options['date_from']) ? str_replace('T', ' ', $options['date_from']) : '';
-            $end = !empty($options['date_to']) ? str_replace('T', ' ', $options['date_to']) : '';
-            return [
-                'start' => $start,
-                'end' => $end,
-                'label' => self::formatRangeLabel($start, $end),
-            ];
-        }
-
         $timezone = new DateTimeZone($options['timezone']);
         $now = new DateTimeImmutable('now', $timezone);
-        $thisMonday = $now->modify('monday this week')->setTime(0, 0, 0);
-        $start = $thisMonday->modify('-7 days');
-        $end = $thisMonday->modify('-1 second');
+        $regen_weekday = !empty($options['regen_weekday']) ? (string) $options['regen_weekday'] : 'monday';
+        $boundary = $now->modify($regen_weekday . ' this week')->setTime(0, 0, 0);
+
+        // Use the most recent closed weekly window anchored to selected weekday.
+        if ($boundary > $now) {
+            $boundary = $boundary->modify('-7 days');
+        }
+
+        $start = $boundary->modify('-7 days');
+        $end = $boundary->modify('-1 second');
 
         return [
             'start' => $start->format('Y-m-d H:i:s'),
@@ -372,7 +351,7 @@ class ADFNews_Weekly_PDF_Plugin
         echo '</div>';
     }
 
-    private static function createDompdfDocument(array $posts, array $options, bool $isTest): string
+    private static function createDompdfDocument(array $posts, array $options): string
     {
         self::loadDompdfAutoloader();
 
@@ -380,7 +359,7 @@ class ADFNews_Weekly_PDF_Plugin
             return '';
         }
 
-        $html = self::buildPdfHtml($posts, $options, $isTest);
+        $html = self::buildPdfHtml($posts, $options);
         $dompdf = new \Dompdf\Dompdf([
             'isRemoteEnabled' => true,
             'isHtml5ParserEnabled' => true,
@@ -407,7 +386,7 @@ class ADFNews_Weekly_PDF_Plugin
         }
     }
 
-    private static function buildPdfHtml(array $posts, array $options, bool $isTest): string
+    private static function buildPdfHtml(array $posts, array $options): string
     {
         ob_start();
         ?>
@@ -581,8 +560,6 @@ class ADFNews_Weekly_PDF_Plugin
             'exclude_categories' => '',
             'max_articles' => 20,
             'include_images' => 1,
-            'date_from' => '',
-            'date_to' => '',
         ];
     }
 
@@ -613,20 +590,6 @@ class ADFNews_Weekly_PDF_Plugin
         return array_values(array_unique(array_map('intval', $parts)));
     }
 
-    private static function sanitizeDateTime(string $value): string
-    {
-        $value = trim($value);
-        if ($value === '') {
-            return '';
-        }
-
-        $dt = DateTimeImmutable::createFromFormat('Y-m-d\TH:i', $value);
-        if (!$dt) {
-            return '';
-        }
-
-        return $dt->format('Y-m-d\TH:i');
-    }
 }
 
 ADFNews_Weekly_PDF_Plugin::boot();
