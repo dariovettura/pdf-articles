@@ -419,10 +419,9 @@ class ADFNews_Weekly_PDF_Plugin
                 @page { margin: 28px 24px; }
                 body { font-family: DejaVu Sans, Arial, sans-serif; font-size: 12px; color: #111; line-height: 1.55; }
                 h1, h2, h3 { margin: 0 0 8px 0; }
-                .cover { border-bottom: 1px solid #ddd; margin-bottom: 14px; padding-bottom: 12px; }
+                .cover { border-bottom: 1px solid #ddd; margin-bottom: 10px; padding-bottom: 8px; }
                 .meta { color: #666; font-size: 11px; margin-bottom: 12px; }
-                .article { page-break-before: always; }
-                .article:first-of-type { page-break-before: auto; }
+                .article { margin-bottom: 16px; page-break-inside: auto; }
                 .content, .content * {
                     word-wrap: break-word;
                     overflow-wrap: break-word;
@@ -435,11 +434,9 @@ class ADFNews_Weekly_PDF_Plugin
         </head>
         <body>
         <div class="cover">
-            <h1>ADF News - Export PDF</h1>
+            <h1>ADF News</h1>
             <div class="meta">
-                Generato: <?php echo esc_html(current_time('mysql')); ?><br />
-                Modalita: <?php echo esc_html($isTest ? 'TEST' : 'CRON/MANUALE'); ?><br />
-                Articoli: <?php echo esc_html((string) count($posts)); ?>
+                Generato: <?php echo esc_html(current_time('mysql')); ?>
             </div>
         </div>
         <?php foreach ($posts as $index => $post) : ?>
